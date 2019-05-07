@@ -27,6 +27,21 @@ func (x *ListenAt) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+// ConnectTo is a type for connection destination specification compatible with
+// net.Dial function.
+type ConnectTo string
+
+// UnmarshalJSON is an implementation of json.Unmarshaler for ConnectTo
+func (x *ConnectTo) UnmarshalJSON(data []byte) error {
+	var s string
+	if err := json.Unmarshal(data, &s); err != nil {
+		return err
+	}
+
+	*x = ConnectTo(s)
+	return nil
+}
+
 // Limit is a bandwidth limit expressed in bytes per second.
 type Limit int64
 
@@ -85,21 +100,21 @@ func (x *Limit) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-type Configuration struct {
-	Tunnels map[ListenAt]TunnelConfig `json:"tunnels"`
+type ConfigurationJSON struct {
+	Tunnels map[ListenAt]TunnelConfigJSON `json:"tunnels"`
 }
 
-type TunnelConfig struct {
-	Connect         string `json:"connect"`
-	TunnelLimit     Limit  `json:"tunnelLimit"`
-	ConnectionLimit Limit  `json:"connectionLimit"`
+type TunnelConfigJSON struct {
+	ConnectTo       ConnectTo `json:"connectTo"`
+	TunnelLimit     Limit     `json:"tunnelLimit"`
+	ConnectionLimit Limit     `json:"connectionLimit"`
 }
 
 // LoadAndWatch loads configuration from a given path, pushes it onto a
 // configUpdate channel and starts listening for SIGUSR2 signals to reload
 // config until quit channel gets closed. Upon each SIGUSR2 configuration is
 // reloaded and sent to configUpdate.
-func LoadAndWatch(path string, configUpdate chan<- Configuration, gs *gracefulShutdown) error {
+func LoadAndWatch(path string, configUpdate chan<- ConfigurationJSON, gs *gracefulShutdown) error {
 	initial, err := load(path)
 	if err != nil {
 		return err
@@ -133,18 +148,18 @@ func LoadAndWatch(path string, configUpdate chan<- Configuration, gs *gracefulSh
 	return nil
 }
 
-func load(path string) (Configuration, error) {
+func load(path string) (ConfigurationJSON, error) {
 	contents, err := ioutil.ReadFile(path)
 	if err != nil {
 		log.Printf("Failed to read configuration file at %q: %v\n", path, err)
-		return Configuration{}, err
+		return ConfigurationJSON{}, err
 	}
 
-	temp := new(Configuration)
+	temp := new(ConfigurationJSON)
 
 	if err = json.Unmarshal(contents, temp); err != nil {
 		log.Printf("Failed to parse configuration file at %q: %v\n", path, err)
-		return Configuration{}, err
+		return ConfigurationJSON{}, err
 	}
 
 	return *temp, nil

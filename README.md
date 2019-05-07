@@ -10,9 +10,9 @@ go build && ./throttle
 
 Configuration is a map of tunnels. For each tunnel map key is a listening tcp
 port specification (as defined by net.Listen) and value is JSON object with
-fields "connect", "tunnelLimit" and "connectionLimit". For each inbound
+fields "connectTo", "tunnelLimit" and "connectionLimit". For each inbound
 connection to listening tcp port, throttle app opens outbound connection to
-an address specified by "connect" and forwards traffic to it.
+an address specified by "connectTo" and forwards traffic to it.
 
 There are two limits associated with each tunnel - "tunnel limit" and
 "connection limit". "Tunnel limit" specifies the throughput to never exceed

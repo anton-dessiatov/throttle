@@ -23,7 +23,7 @@ func Run() {
 		waitGroup: new(sync.WaitGroup),
 	}
 
-	configUpdate := make(chan Configuration)
+	configUpdate := make(chan ConfigurationJSON)
 
 	go dispatch(configUpdate, gs)
 

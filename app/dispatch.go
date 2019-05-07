@@ -3,15 +3,20 @@ package app
 import "log"
 
 type dispatchTunnel struct {
-	tunnel     tunnel
-	lastConfig TunnelConfig
+	tunnel     Tunnel
+	lastLimits TunnelLimits
 }
 
-func dispatch(configUpdate <-chan Configuration, gs *gracefulShutdown) {
+type tunnelKey struct {
+	listenAt  ListenAt
+	connectTo ConnectTo
+}
+
+func dispatch(configUpdate <-chan ConfigurationJSON, gs *gracefulShutdown) {
 	gs.waitGroup.Add(1)
 	defer gs.waitGroup.Done()
 
-	tunnels := make(map[ListenAt]*dispatchTunnel)
+	tunnels := make(map[tunnelKey]*dispatchTunnel)
 
 	for {
 		select {
@@ -19,33 +24,41 @@ func dispatch(configUpdate <-chan Configuration, gs *gracefulShutdown) {
 			log.Printf("Configuration update: %v", config)
 			// Sweep the map and update configuration for tunnels that need it
 			for k, v := range config.Tunnels {
-				t, ok := tunnels[k]
+				tunnelKey := tunnelKey{
+					listenAt:  k,
+					connectTo: v.ConnectTo,
+				}
+				tunnelLimits := TunnelLimits{
+					TunnelLimit:     v.TunnelLimit,
+					ConnectionLimit: v.ConnectionLimit,
+				}
+				t, ok := tunnels[tunnelKey]
 				if ok {
-					if t.lastConfig != v {
-						t.tunnel.configUpdate <- v
-						t.lastConfig = v
+					if t.lastLimits != tunnelLimits {
+						t.tunnel.LimitsUpdate <- tunnelLimits
+						t.lastLimits = tunnelLimits
 					}
 				} else {
-					t, err := CreateTunnel(k, v, gs)
+					t, err := CreateTunnel(tunnelKey.listenAt, tunnelKey.connectTo, tunnelLimits, gs)
 					if err != nil {
-						log.Printf("Failed to create tunnel for %q: %v", k, err)
+						log.Printf("Failed to create tunnel for %q: %v", tunnelKey, err)
 					} else {
-						tunnels[k] = &dispatchTunnel{
+						tunnels[tunnelKey] = &dispatchTunnel{
 							tunnel:     t,
-							lastConfig: v,
+							lastLimits: tunnelLimits,
 						}
 					}
 				}
 			}
 			// Sweep existing tunnels to shutdown ones that are no longer present in
 			// configuration:
-			survivors := make(map[ListenAt]*dispatchTunnel)
+			survivors := make(map[tunnelKey]*dispatchTunnel)
 			for k, v := range tunnels {
-				_, ok := config.Tunnels[k]
-				if ok {
+				configTunnel, ok := config.Tunnels[k.listenAt]
+				if ok && k.connectTo == configTunnel.ConnectTo {
 					survivors[k] = v
 				} else {
-					close(v.tunnel.shutdown)
+					close(v.tunnel.Shutdown)
 				}
 			}
 
