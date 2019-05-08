@@ -15,9 +15,10 @@ import (
 )
 
 type forward struct {
-	from     net.Conn
-	to       net.Conn
-	limiters []*rate.Limiter
+	from           net.Conn
+	to             net.Conn
+	limiters       []*rate.Limiter
+	updateLimiters <-chan []*rate.Limiter
 }
 
 // Forwards traffic between connections and respects all bandwidth limits.
@@ -27,14 +28,24 @@ type forward struct {
 // This function also returns nil in case any of connections gets closed more
 // or less normally (including remote peer forcibly closing the connection)
 func (f forward) run(ctx context.Context) error {
-	buf := make([]byte, ForwarderBufSize)
+	buf := make([]byte, getMinBufferSize(f.limiters))
 	reservations := make([]*rate.Reservation, 0, len(f.limiters))
 	netOpDone := make(chan struct{})
 	var nr int
 	var nw int
 	var err error
 	for {
+		select {
+		case newLimiters := <-f.updateLimiters:
+			f.limiters = newLimiters
+			buf = make([]byte, getMinBufferSize(f.limiters))
+		default:
+		}
+
 		go func() {
+			// We take care about waking up no less than 2 times per second to avoid
+			// introducing huge delays
+			f.from.SetReadDeadline(time.Now().Add(time.Second / 2))
 			nr, err = f.from.Read(buf)
 			netOpDone <- struct{}{}
 		}()
@@ -42,6 +53,9 @@ func (f forward) run(ctx context.Context) error {
 		select {
 		case <-netOpDone:
 			if err != nil {
+				if isTimeout(err) {
+					continue
+				}
 				if isConnectionClosed(err) {
 					return nil
 				}
@@ -80,6 +94,14 @@ func (f forward) run(ctx context.Context) error {
 			} // select
 		} // if nr > 0
 	} // for
+}
+
+// isTimeout returns true if given error is network timeout
+func isTimeout(err error) bool {
+	if opErr, ok := err.(*net.OpError); ok {
+		return opErr.Timeout()
+	}
+	return false
 }
 
 // isConnectionClosed returns true if error indicates that connection was

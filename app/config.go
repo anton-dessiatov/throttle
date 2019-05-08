@@ -2,7 +2,7 @@ package app
 
 import (
 	"encoding/json"
-	"errors"
+	"fmt"
 	"io/ioutil"
 	"log"
 	"os"
@@ -101,10 +101,14 @@ func (x *Limit) UnmarshalJSON(data []byte) error {
 		}
 		bytesPerSecond *= mul
 		bytesPerSecond /= div
+
+		if bytesPerSecond <= 0 {
+			return fmt.Errorf("%q is too small for bandwidth limit", s)
+		}
 	}
 
 	if bytesPerSecond <= 0 {
-		return errors.New("%v is not a valid value for bandwidth limit")
+		return fmt.Errorf("%d is not a valid value for bandwidth limit", bytesPerSecond)
 	}
 
 	*x = Limit(bytesPerSecond)
