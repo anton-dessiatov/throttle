@@ -10,43 +10,44 @@ import (
 	"golang.org/x/time/rate"
 )
 
+// TunnelLimits encapsulates bandwidth limits for a given tunnel.
 type TunnelLimits struct {
-	TunnelLimit     Limit
+	// Overall tunnel bandwidth limit. Total bandwidth usage by a tunnel never
+	// exceeds this value
+	TunnelLimit Limit
+	// Bandwidth limit for individual connections of this tunnel. No single
+	// connection made as a part of this tunnel is allowed to exceed this limit.
 	ConnectionLimit Limit
 }
 
 // Tunnel is a structure that contains everything you might need to manage an
 // existing TCP tunnel
 type Tunnel struct {
-	// Send configuration on this channel to update the tunnel
-	LimitsUpdate chan<- TunnelLimits
-	// Close this channel to shut down the tunnel
-	Shutdown chan<- struct{}
+	limitsUpdate chan<- TunnelLimits
+	shutdown     chan<- struct{}
+	waitGroup    *sync.WaitGroup
 }
 
-type internalTunnel struct {
-	connectTo       ConnectTo
-	limitsUpdate    chan TunnelLimits
-	shutdown        chan struct{}
-	listener        net.Listener
-	waitGroup       *sync.WaitGroup
-	tunnelLimiter   *rate.Limiter
-	connectionLimit Limit
+// UpdateLimits sets new bandwidth limits for a tunnel. All active connections
+// of given tunnel are notified and have their limits updated as well.
+func (t Tunnel) UpdateLimits(newLimits TunnelLimits) {
+	t.limitsUpdate <- newLimits
 }
 
-func (it internalTunnel) toTunnel() Tunnel {
-	return Tunnel{
-		LimitsUpdate: it.limitsUpdate,
-		Shutdown:     it.shutdown,
-	}
+// Shutdown shuts the tunnel down and blocks until shutdown process is complete.
+// This means waiting until all connections and listening socket get close.
+func (t Tunnel) Shutdown() {
+	close(t.shutdown)
+	t.waitGroup.Wait()
 }
 
 // CreateTunnel creates a traffic forwarding tunnel with a given listen port
 // spec and configuration and returns a structure containing control channels
 // for the new tunnel.
-func CreateTunnel(listenAt ListenAt, connectTo ConnectTo, limits TunnelLimits, wg *sync.WaitGroup) (Tunnel, error) {
+func CreateTunnel(listenAt ListenAt, connectTo ConnectTo, limits TunnelLimits) (Tunnel, error) {
 	shutdown := make(chan struct{})
 	limitsUpdate := make(chan TunnelLimits)
+	wg := new(sync.WaitGroup)
 
 	log.Printf("Starting tunnel at %q", listenAt)
 
@@ -56,14 +57,14 @@ func CreateTunnel(listenAt ListenAt, connectTo ConnectTo, limits TunnelLimits, w
 		return Tunnel{}, err
 	}
 	// It's internalTunnel's run() responsibility to close the listener
-	result := &internalTunnel{
+	ti := &tunnelInternals{
 		connectTo:       connectTo,
 		limitsUpdate:    limitsUpdate,
 		shutdown:        shutdown,
 		listener:        l,
-		waitGroup:       wg,
 		tunnelLimiter:   rate.NewLimiter(rate.Limit(limits.TunnelLimit), ForwarderBufSize),
 		connectionLimit: limits.ConnectionLimit,
+		waitGroup:       wg,
 	}
 
 	wg.Add(1)
@@ -73,14 +74,20 @@ func CreateTunnel(listenAt ListenAt, connectTo ConnectTo, limits TunnelLimits, w
 		retry := make(chan struct{})
 
 		for {
-			if result.listener != nil {
-				err := result.run(string(listenAt))
+			if ti.listener != nil {
+				err := ti.run(string(listenAt))
 				if err == nil {
 					return
 				}
 				// err is not nil, which means that there was an error trying to accept
 				// connection. This means that listening socket is no longer in a valid
 				// state. Retry listening
+				err = ti.listener.Close()
+				if err != nil {
+					log.Printf("Failed to close listening socket for %q after discovering "+
+						"accept failure: %v", listenAt, err)
+				}
+				ti.listener = nil
 				log.Printf("Failed to accept connection on listener %q: %v", listenAt, err)
 			}
 
@@ -95,16 +102,34 @@ func CreateTunnel(listenAt ListenAt, connectTo ConnectTo, limits TunnelLimits, w
 				if err != nil {
 					log.Printf("Failed to listen at %q: %v", listenAt, err)
 				} else {
-					result.listener = l
+					ti.listener = l
 				}
 			case <-shutdown:
 				log.Printf("Detected tunnel shutdown while retrying listening at %q", listenAt)
 				return
-			}
-		}
+			} // select
+		} // for
 	}()
 
-	return result.toTunnel(), nil
+	return ti.toTunnel(), nil
+}
+
+type tunnelInternals struct {
+	connectTo       ConnectTo
+	limitsUpdate    chan TunnelLimits
+	shutdown        chan struct{}
+	listener        net.Listener
+	tunnelLimiter   *rate.Limiter
+	connectionLimit Limit
+	waitGroup       *sync.WaitGroup
+}
+
+func (ti tunnelInternals) toTunnel() Tunnel {
+	return Tunnel{
+		limitsUpdate: ti.limitsUpdate,
+		shutdown:     ti.shutdown,
+		waitGroup:    ti.waitGroup,
+	}
 }
 
 type acceptedConnection struct {
@@ -112,7 +137,7 @@ type acceptedConnection struct {
 	err        error
 }
 
-func (it *internalTunnel) run(id string) error {
+func (ti *tunnelInternals) run(id string) error {
 	pendingConnection := make(chan acceptedConnection)
 	// In the very worst case we might find ourselves with an accepted connection
 	// in the pendingConnection channel that haven't been read out of it. That's
@@ -128,13 +153,13 @@ func (it *internalTunnel) run(id string) error {
 		default:
 		}
 	}()
-	defer it.listener.Close()
+	defer ti.listener.Close()
 
 	// Start acceptor goroutine. It accepts incoming connections and sends them
 	// to pendingConnection channel.
 	go func() {
 		for {
-			conn, err := it.listener.Accept()
+			conn, err := ti.listener.Accept()
 			if err != nil {
 				pendingConnection <- acceptedConnection{
 					connection: nil,
@@ -173,15 +198,15 @@ func (it *internalTunnel) run(id string) error {
 			log.Printf("Accepted connection at %q", id)
 
 			conn, err := newConnection{
-				ingress:           netConn.connection,
-				connectTo:         it.connectTo,
-				waitGroup:         it.waitGroup,
-				complete:          completeChan,
-				tunnelLimiter:     it.tunnelLimiter,
-				connectionLimiter: rate.NewLimiter(rate.Limit(it.connectionLimit), ForwarderBufSize),
+				ingress:         netConn.connection,
+				connectTo:       ti.connectTo,
+				waitGroup:       ti.waitGroup,
+				complete:        completeChan,
+				tunnelLimiter:   ti.tunnelLimiter,
+				connectionLimit: ti.connectionLimit,
 			}.create()
 			if err != nil {
-				log.Printf("Failed to connect to %q: %v", it.connectTo, err)
+				log.Printf("Failed to connect to %q: %v", ti.connectTo, err)
 				netConn.connection.Close()
 			} else {
 				activeConnections[conn] = struct{}{}
@@ -196,18 +221,18 @@ func (it *internalTunnel) run(id string) error {
 				complete.connection.close()
 				log.Printf("Closed connection at %q", id)
 			}
-		case limits := <-it.limitsUpdate:
-			it.tunnelLimiter.SetLimit(rate.Limit(limits.TunnelLimit))
-			it.connectionLimit = limits.ConnectionLimit
+		case limits := <-ti.limitsUpdate:
+			ti.tunnelLimiter.SetLimit(rate.Limit(limits.TunnelLimit))
+			ti.connectionLimit = limits.ConnectionLimit
 			for conn := range activeConnections {
 				conn.connectionLimiter.SetLimit(rate.Limit(limits.ConnectionLimit))
 			}
 			log.Printf("Tunnel at %q limits updated: %v", id, limits)
-		case <-it.shutdown:
+		case <-ti.shutdown:
 			log.Printf("Tunnel at %q shutting down", id)
 			return nil
-		}
-	}
+		} // select
+	} // for
 }
 
 type connection struct {
@@ -221,12 +246,12 @@ type connectionComplete struct {
 }
 
 type newConnection struct {
-	ingress           net.Conn
-	connectTo         ConnectTo
-	waitGroup         *sync.WaitGroup
-	complete          chan<- connectionComplete
-	tunnelLimiter     *rate.Limiter
-	connectionLimiter *rate.Limiter
+	ingress         net.Conn
+	connectTo       ConnectTo
+	waitGroup       *sync.WaitGroup
+	complete        chan<- connectionComplete
+	tunnelLimiter   *rate.Limiter
+	connectionLimit Limit
 }
 
 func (c newConnection) create() (*connection, error) {
@@ -248,51 +273,58 @@ func (c newConnection) create() (*connection, error) {
 				log.Printf("Failed to close ingress connection: %v", err)
 			}
 		},
-		connectionLimiter: c.connectionLimiter,
+		connectionLimiter: rate.NewLimiter(rate.Limit(c.connectionLimit), ForwarderBufSize),
 	}
 
 	c.waitGroup.Add(1)
+	limiters := []*rate.Limiter{c.tunnelLimiter, result.connectionLimiter}
 	go func() {
 		defer c.waitGroup.Done()
-		err := forward{
+		forwardWithCompletion{
 			from:     c.ingress,
 			to:       egress,
-			limiters: []*rate.Limiter{c.tunnelLimiter, c.connectionLimiter},
-		}.run(ctx)
-		if err != nil {
-			log.Printf("Failed to forward ingress to egress: %v", err)
-		}
-		select {
-		case c.complete <- connectionComplete{
-			connection: result,
-			err:        err,
-		}:
-		case <-ctx.Done():
-			// If we've been canceled then no one expects our completion report
-		}
+			limiters: limiters,
+			complete: c.complete,
+		}.run(ctx, result)
 	}()
 
 	c.waitGroup.Add(1)
 	go func() {
 		defer c.waitGroup.Done()
-		err := forward{
+		forwardWithCompletion{
 			from:     egress,
 			to:       c.ingress,
-			limiters: []*rate.Limiter{c.tunnelLimiter, c.connectionLimiter},
-		}.run(ctx)
-		if err != nil {
-			log.Printf("Failed to forward egress to ingress: %v", err)
-		}
-
-		select {
-		case c.complete <- connectionComplete{
-			connection: result,
-			err:        err,
-		}:
-		case <-ctx.Done():
-			// If we've been canceled then no one expects our completion report
-		}
+			limiters: limiters,
+			complete: c.complete,
+		}.run(ctx, result)
 	}()
 
 	return result, nil
+}
+
+type forwardWithCompletion struct {
+	from     net.Conn
+	to       net.Conn
+	limiters []*rate.Limiter
+	complete chan<- connectionComplete
+}
+
+func (fwc forwardWithCompletion) run(ctx context.Context, conn *connection) {
+	err := forward{
+		from:     fwc.from,
+		to:       fwc.to,
+		limiters: fwc.limiters,
+	}.run(ctx)
+	if err != nil {
+		log.Printf("Failed to forward egress to ingress: %v", err)
+	}
+
+	select {
+	case fwc.complete <- connectionComplete{
+		connection: conn,
+		err:        err,
+	}:
+	case <-ctx.Done():
+		// If we've been canceled then no one expects our completion report
+	} // select
 }

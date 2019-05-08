@@ -14,6 +14,7 @@ type gracefulShutdown struct {
 	waitGroup *sync.WaitGroup
 }
 
+// Run gets the party started
 func Run() {
 	log.Println("Running")
 

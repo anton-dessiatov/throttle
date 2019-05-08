@@ -20,6 +20,12 @@ type forward struct {
 	limiters []*rate.Limiter
 }
 
+// Forwards traffic between connections and respects all bandwidth limits.
+// If context gets cancelled, forwarding is cancelled as well and function
+// returns nil.
+//
+// This function also returns nil in case any of connections gets closed more
+// or less normally (including remote peer forcibly closing the connection)
 func (f forward) run(ctx context.Context) error {
 	buf := make([]byte, ForwarderBufSize)
 	reservations := make([]*rate.Reservation, 0, len(f.limiters))
@@ -39,12 +45,12 @@ func (f forward) run(ctx context.Context) error {
 				if isConnectionClosed(err) {
 					return nil
 				}
-				log.Printf("Failed to read from ingress conn: %v", err)
+				log.Printf("Failed to read from conn: %v", err)
 				return err
 			}
 		case <-ctx.Done():
 			return nil
-		}
+		} // select
 
 		if nr > 0 {
 			err = waitMultipleLimiters(ctx, f.limiters, reservations, nr)
@@ -63,7 +69,7 @@ func (f forward) run(ctx context.Context) error {
 					if isConnectionClosed(err) {
 						return nil
 					}
-					log.Printf("Failed to write to ingress conn: %v", err)
+					log.Printf("Failed to write to conn: %v", err)
 					return err
 				}
 				if nw != nr {
@@ -71,13 +77,14 @@ func (f forward) run(ctx context.Context) error {
 				}
 			case <-ctx.Done():
 				return nil
-			}
-		}
-	}
+			} // select
+		} // if nr > 0
+	} // for
 }
 
 // isConnectionClosed returns true if error indicates that connection was
-// legitimately closed by peer (either EOF or ECONNRESET)
+// legitimately closed by peer (either EOF or ECONNRESET or EPIPE) or connection
+// was closed due to socket shutdown (EPIPE)
 func isConnectionClosed(err error) bool {
 	if err == io.EOF {
 		return true
@@ -101,9 +108,9 @@ func isConnectionClosed(err error) bool {
 	return false
 }
 
-// reservations argument is pure optimization. It's just a 'scratch space'.
-// Don't store anything in reservations and don't expect to have anything there
-// after function returns.
+// reservations argument is pure optimization. It's just a 'scratch space' to
+// avoid allocating it upon each call. Don't store anything in reservations and
+// don't expect to have anything there after function returns.
 func waitMultipleLimiters(ctx context.Context, limiters []*rate.Limiter, reservations []*rate.Reservation, n int) error {
 	reservations = reservations[:0]
 
@@ -122,13 +129,13 @@ func waitMultipleLimiters(ctx context.Context, limiters []*rate.Limiter, reserva
 		}
 
 		reservations = append(reservations, r)
-	}
+	} // for
 
 	for _, r := range reservations {
 		if r.Delay() > delay {
 			delay = r.Delay()
 		}
-	}
+	} // for
 
 	if delay == 0 {
 		reservations = reservations[:0]
@@ -144,5 +151,5 @@ func waitMultipleLimiters(ctx context.Context, limiters []*rate.Limiter, reserva
 		return nil
 	case <-ctx.Done():
 		return nil
-	}
+	} // select
 }

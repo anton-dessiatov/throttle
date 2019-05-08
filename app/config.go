@@ -111,10 +111,14 @@ func (x *Limit) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+// ConfigurationJSON encapsulates application confituration as defined in
+// configuration file
 type ConfigurationJSON struct {
 	Tunnels map[ListenAt]TunnelConfigJSON `json:"tunnels"`
 }
 
+// TunnelConfigJSON encapsulates configuration of an individual tunnel as
+// defined in configuration file
 type TunnelConfigJSON struct {
 	ConnectTo       ConnectTo `json:"connectTo"`
 	TunnelLimit     Limit     `json:"tunnelLimit"`

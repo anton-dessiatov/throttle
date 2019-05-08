@@ -34,12 +34,12 @@ func dispatch(configUpdate <-chan ConfigurationJSON, gs *gracefulShutdown) {
 				if ok && k.connectTo == configTunnel.ConnectTo {
 					survivors[k] = v
 				} else {
-					close(v.tunnel.Shutdown)
-					v.waitGroup.Wait()
+					v.tunnel.Shutdown()
 				}
 			}
 
 			tunnels = survivors
+
 			// Sweep the map and update configuration for tunnels that need it
 			for k, v := range config.Tunnels {
 				tunnelKey := tunnelKey{
@@ -53,29 +53,26 @@ func dispatch(configUpdate <-chan ConfigurationJSON, gs *gracefulShutdown) {
 				t, ok := tunnels[tunnelKey]
 				if ok {
 					if t.lastLimits != tunnelLimits {
-						t.tunnel.LimitsUpdate <- tunnelLimits
+						t.tunnel.UpdateLimits(tunnelLimits)
 						t.lastLimits = tunnelLimits
 					}
 				} else {
-					wg := new(sync.WaitGroup)
-					t, err := CreateTunnel(tunnelKey.listenAt, tunnelKey.connectTo, tunnelLimits, wg)
+					t, err := CreateTunnel(tunnelKey.listenAt, tunnelKey.connectTo, tunnelLimits)
 					if err != nil {
 						log.Printf("Failed to create tunnel for %q: %v", tunnelKey, err)
 					} else {
 						tunnels[tunnelKey] = &dispatchTunnel{
 							tunnel:     t,
 							lastLimits: tunnelLimits,
-							waitGroup:  wg,
 						}
 					}
 				}
 			}
 		case <-gs.quit:
 			for _, v := range tunnels {
-				close(v.tunnel.Shutdown)
-				v.waitGroup.Wait()
+				v.tunnel.Shutdown()
 			}
 			return
-		}
-	}
+		} // select
+	} // for
 }
