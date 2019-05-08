@@ -45,28 +45,38 @@ func (x *ConnectTo) UnmarshalJSON(data []byte) error {
 // Limit is a bandwidth limit expressed in bytes per second.
 type Limit int64
 
-// uom stands for Unit Of Measurement
+// uom stands for Unit Of Measurement. Units are BITS per second, not bytes
 var uomSuffixes = []struct {
 	unit string
 	mul  int64
+	div  int64
 }{
-	{unit: "kbps", mul: 1024},
-	{unit: "mbps", mul: 1024 * 1024},
-	{unit: "gbps", mul: 1024 * 1024 * 1024},
-	{unit: "bps", mul: 1},
+	// IPerf assumes that megabit per second is exactly 1000000 bits per second
+	// (not 1024 * 1024)
+	{unit: "Kbps", mul: 1000, div: 8},
+	{unit: "Mbps", mul: 1000 * 1000, div: 8},
+	{unit: "Gbps", mul: 1000 * 1000 * 1000, div: 8},
+	// tcptrack, on the other hand, uses <prefix>bytes per second where prefix
+	// is a power of 2, that's why I'm using powers of 1024 for bytes-per-second
+	// units
+	{unit: "KBps", mul: 1024, div: 1},
+	{unit: "MBps", mul: 1024 * 1024, div: 1},
+	{unit: "GBps", mul: 1024 * 1024 * 1024, div: 1},
+	{unit: "bps", mul: 1, div: 8},
+	{unit: "Bps", mul: 1, div: 1},
 }
 
 // Tries to parse an UOM suffix from a string. Returns string stripped from that
 // suffix and a multiplier. If no suffix matches, returns string as is and 1 as
 // a multiplier.
-func parseSuffix(s string) (string, int64) {
+func parseSuffix(s string) (string, int64, int64) {
 	for _, v := range uomSuffixes {
-		if strings.HasSuffix(strings.ToLower(s), v.unit) {
-			return s[0 : len(s)-len(v.unit)], v.mul
+		if strings.HasSuffix(s, v.unit) {
+			return s[0 : len(s)-len(v.unit)], v.mul, v.div
 		}
 	}
 
-	return s, 1
+	return s, 1, 1
 }
 
 // UnmarshalJSON is an implementation of json.Unmarshaler for Limit
@@ -84,12 +94,13 @@ func (x *Limit) UnmarshalJSON(data []byte) error {
 			return err
 		}
 
-		numberString, mul := parseSuffix(s)
+		numberString, mul, div := parseSuffix(s)
 		bytesPerSecond, err = strconv.ParseInt(numberString, 10, 64)
 		if err != nil {
 			return err
 		}
 		bytesPerSecond *= mul
+		bytesPerSecond /= div
 	}
 
 	if bytesPerSecond <= 0 {

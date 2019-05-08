@@ -25,11 +25,13 @@ type Tunnel struct {
 }
 
 type internalTunnel struct {
-	connectTo    ConnectTo
-	limitsUpdate chan TunnelLimits
-	shutdown     chan struct{}
-	listener     net.Listener
-	waitGroup    *sync.WaitGroup
+	connectTo       ConnectTo
+	limitsUpdate    chan TunnelLimits
+	shutdown        chan struct{}
+	listener        net.Listener
+	waitGroup       *sync.WaitGroup
+	tunnelLimiter   *rate.Limiter
+	connectionLimit Limit
 }
 
 func (it internalTunnel) toTunnel() Tunnel {
@@ -55,11 +57,13 @@ func CreateTunnel(listenAt ListenAt, connectTo ConnectTo, limits TunnelLimits, w
 	}
 	// It's internalTunnel's run() responsibility to close the listener
 	result := &internalTunnel{
-		connectTo:    connectTo,
-		limitsUpdate: limitsUpdate,
-		shutdown:     shutdown,
-		listener:     l,
-		waitGroup:    wg,
+		connectTo:       connectTo,
+		limitsUpdate:    limitsUpdate,
+		shutdown:        shutdown,
+		listener:        l,
+		waitGroup:       wg,
+		tunnelLimiter:   rate.NewLimiter(rate.Limit(limits.TunnelLimit), ForwarderBufSize),
+		connectionLimit: limits.ConnectionLimit,
 	}
 
 	wg.Add(1)
@@ -169,10 +173,12 @@ func (it *internalTunnel) run(id string) error {
 			log.Printf("Accepted connection at %q", id)
 
 			conn, err := newConnection{
-				ingress:   netConn.connection,
-				connectTo: it.connectTo,
-				waitGroup: it.waitGroup,
-				complete:  completeChan,
+				ingress:           netConn.connection,
+				connectTo:         it.connectTo,
+				waitGroup:         it.waitGroup,
+				complete:          completeChan,
+				tunnelLimiter:     it.tunnelLimiter,
+				connectionLimiter: rate.NewLimiter(rate.Limit(it.connectionLimit), ForwarderBufSize),
 			}.create()
 			if err != nil {
 				log.Printf("Failed to connect to %q: %v", it.connectTo, err)
@@ -191,6 +197,11 @@ func (it *internalTunnel) run(id string) error {
 				log.Printf("Closed connection at %q", id)
 			}
 		case limits := <-it.limitsUpdate:
+			it.tunnelLimiter.SetLimit(rate.Limit(limits.TunnelLimit))
+			it.connectionLimit = limits.ConnectionLimit
+			for conn := range activeConnections {
+				conn.connectionLimiter.SetLimit(rate.Limit(limits.ConnectionLimit))
+			}
 			log.Printf("Tunnel at %q limits updated: %v", id, limits)
 		case <-it.shutdown:
 			log.Printf("Tunnel at %q shutting down", id)
@@ -200,7 +211,8 @@ func (it *internalTunnel) run(id string) error {
 }
 
 type connection struct {
-	close func()
+	connectionLimiter *rate.Limiter
+	close             func()
 }
 
 type connectionComplete struct {
@@ -209,10 +221,12 @@ type connectionComplete struct {
 }
 
 type newConnection struct {
-	ingress   net.Conn
-	connectTo ConnectTo
-	waitGroup *sync.WaitGroup
-	complete  chan<- connectionComplete
+	ingress           net.Conn
+	connectTo         ConnectTo
+	waitGroup         *sync.WaitGroup
+	complete          chan<- connectionComplete
+	tunnelLimiter     *rate.Limiter
+	connectionLimiter *rate.Limiter
 }
 
 func (c newConnection) create() (*connection, error) {
@@ -234,6 +248,7 @@ func (c newConnection) create() (*connection, error) {
 				log.Printf("Failed to close ingress connection: %v", err)
 			}
 		},
+		connectionLimiter: c.connectionLimiter,
 	}
 
 	c.waitGroup.Add(1)
@@ -242,14 +257,18 @@ func (c newConnection) create() (*connection, error) {
 		err := forward{
 			from:     c.ingress,
 			to:       egress,
-			limiters: []*rate.Limiter{},
+			limiters: []*rate.Limiter{c.tunnelLimiter, c.connectionLimiter},
 		}.run(ctx)
 		if err != nil {
 			log.Printf("Failed to forward ingress to egress: %v", err)
 		}
-		c.complete <- connectionComplete{
+		select {
+		case c.complete <- connectionComplete{
 			connection: result,
 			err:        err,
+		}:
+		case <-ctx.Done():
+			// If we've been canceled then no one expects our completion report
 		}
 	}()
 
@@ -259,14 +278,19 @@ func (c newConnection) create() (*connection, error) {
 		err := forward{
 			from:     egress,
 			to:       c.ingress,
-			limiters: []*rate.Limiter{},
+			limiters: []*rate.Limiter{c.tunnelLimiter, c.connectionLimiter},
 		}.run(ctx)
 		if err != nil {
 			log.Printf("Failed to forward egress to ingress: %v", err)
 		}
-		c.complete <- connectionComplete{
+
+		select {
+		case c.complete <- connectionComplete{
 			connection: result,
 			err:        err,
+		}:
+		case <-ctx.Done():
+			// If we've been canceled then no one expects our completion report
 		}
 	}()
 

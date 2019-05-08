@@ -1,13 +1,13 @@
-{
-  "tunnels": {
+  {
+    "tunnels": {
     ":32167": {
-      "connectTo": "localhost:32166",
-      "tunnelLimit": "1Mbps",
-      "connectionLimit": "500Kbps"
+      "connectTo": "localhost:32266",
+      "tunnelLimit": "2MBps",
+      "connectionLimit": "1MBps"
     },
     ":32267": {
       "connectTo": "localhost:32266",
-      "tunnelLimit": "10Mbps",
+      "tunnelLimit": "1Mbps",
       "connectionLimit": "1Mbps"
     }
   }

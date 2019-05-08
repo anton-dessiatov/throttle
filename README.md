@@ -29,7 +29,28 @@ ps aux | grep throttle
 kill -12 <pid of throttle>
 ```
 
+# Testing
+
+```
+# 1st console:
+go build && ./throttle
+# 2nd console:
+iperf -s -p 32166
+# 3rd console:
+iperf -c localhost -p 32167 -n 1G
+```
+
+It might also be useful to start [tcptrack](https://linux.die.net/man/1/tcptrack)
+on a nearby console:
+
+```
+sudo tcptrack -i lo
+```
+
 # Remarks
 
  * I'd prefer using fsnotify instead of unobvious reloading upon SIGUSR2 signal,
    but according to assignment I cannot use anything beyond golang.org/x/*
+
+ * I'm not checking for zero throughputs because I believe it might actually be
+   useful to temporarily suspend connections from a given server.
