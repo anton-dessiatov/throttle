@@ -2,30 +2,71 @@ package app
 
 import (
 	"context"
+	"io"
 	"log"
 	"net"
 
 	"golang.org/x/time/rate"
 )
 
-const bufSize = 64 * 1024
+type forward struct {
+	from     net.Conn
+	to       net.Conn
+	limiters []*rate.Limiter
+}
 
-func forward(from net.Conn, to net.Conn, limiters []*rate.Limiter, ctx context.Context) error {
-	buf := make([]byte, bufSize)
+func (f forward) run(ctx context.Context) error {
+	buf := make([]byte, ForwarderBufSize)
+	netOpDone := make(chan struct{})
 	for {
-		n, err := from.Read(buf)
-		if err != nil {
-			log.Printf("Failed to read from ingress conn: %v", err)
-			return err
+		var n int
+		var err error
+		go func() {
+			n, err = f.from.Read(buf)
+			netOpDone <- struct{}{}
+		}()
+
+		select {
+		case <-netOpDone:
+			if err != nil {
+				if err == io.EOF {
+					return nil // Assume graceful completion because of EOF
+				}
+				log.Printf("Failed to read from ingress conn: %v", err)
+				return err
+			}
+		case <-ctx.Done():
+			return nil
 		}
+
 		if n > 0 {
-			for _, lim := range limiters {
+			for _, lim := range f.limiters {
+				// TODO: This is a bit naive. Instead of consequent waits, we should
+				// calculate a time slice big enough for all limiters not to overflow
+				// and only then make a blocking wait on that time slice
 				err = lim.WaitN(ctx, n)
 				if err != nil {
 					return err
 				}
 			}
-			to.Write(buf)
+
+			go func() {
+				n, err = f.to.Write(buf)
+				netOpDone <- struct{}{}
+			}()
+
+			select {
+			case <-netOpDone:
+				if err != nil {
+					if err == io.EOF {
+						return nil // Assume graceful completion because of EOF
+					}
+					log.Printf("Failed to write to ingress conn: %v", err)
+					return err
+				}
+			case <-ctx.Done():
+				return nil
+			}
 		}
 	}
 }

@@ -39,7 +39,7 @@ func dispatch(configUpdate <-chan ConfigurationJSON, gs *gracefulShutdown) {
 						t.lastLimits = tunnelLimits
 					}
 				} else {
-					t, err := CreateTunnel(tunnelKey.listenAt, tunnelKey.connectTo, tunnelLimits, gs)
+					t, err := CreateTunnel(tunnelKey.listenAt, tunnelKey.connectTo, tunnelLimits, gs.waitGroup)
 					if err != nil {
 						log.Printf("Failed to create tunnel for %q: %v", tunnelKey, err)
 					} else {
@@ -64,8 +64,9 @@ func dispatch(configUpdate <-chan ConfigurationJSON, gs *gracefulShutdown) {
 
 			tunnels = survivors
 		case <-gs.quit:
-			// There's no need to shut down individual tunnels because they will react
-			// to the very same gs.quit close
+			for _, v := range tunnels {
+				close(v.tunnel.Shutdown)
+			}
 			return
 		}
 	}
