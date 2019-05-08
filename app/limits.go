@@ -2,6 +2,7 @@ package app
 
 import (
 	"math"
+	"time"
 
 	"golang.org/x/time/rate"
 )
@@ -12,6 +13,10 @@ const MinBufferSize = 1
 // MaxBufferSize defines maximum size for an Rx buffer of a forwarder (and
 // consequently max burst size for rate limiters)
 const MaxBufferSize = 64 * 1024
+
+// MinRateLimiterDelay is minimal amount of time that we consider
+// significant to block forwarder.
+const MinRateLimiterDelay = 5 * time.Millisecond
 
 func createLimiter(limit Limit) *rate.Limiter {
 	return rate.NewLimiter(rate.Limit(limit), getBufferSize(limit))

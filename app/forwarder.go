@@ -159,7 +159,11 @@ func waitMultipleLimiters(ctx context.Context, limiters []*rate.Limiter, reserva
 		}
 	} // for
 
-	if delay == 0 {
+	// The idea is that if delay is too small, it makes sense to disregard it (but
+	// still keep the reservation) so that we hit a bigger delay a bit later when
+	// it grows. Otherwise it might as well take us more than delay time to get
+	// rescheduled (which is going to hurt performance)
+	if delay <= MinRateLimiterDelay {
 		reservations = reservations[:0]
 		return nil
 	}
