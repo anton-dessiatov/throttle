@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"golang.org/x/time/rate"
+	"github.com/anton-dessiatov/throttle/limiter"
 )
 
 // TunnelLimits encapsulates bandwidth limits for a given tunnel.
@@ -23,21 +23,20 @@ type TunnelLimits struct {
 // Tunnel is a structure that contains everything you might need to manage an
 // existing TCP tunnel
 type Tunnel struct {
-	listenAt         ListenAt
-	connectTo        ConnectTo
-	updateLimitsChan chan TunnelLimits
-	shutdown         chan struct{}
-	listener         net.Listener
-	limiter          *rate.Limiter
-	connectionLimit  Limit
-	waitGroup        *sync.WaitGroup
+	listenAt      ListenAt
+	connectTo     ConnectTo
+	shutdown      chan struct{}
+	listener      *limiter.RateLimitingListener
+	currentLimits limiter.RateLimits
+	updateLimits  chan limiter.RateLimits
+	waitGroup     *sync.WaitGroup
 }
 
 // UpdateLimits sets new bandwidth limits for a tunnel. All active connections
 // of given tunnel are notified and have their limits updated as well.
-func (t Tunnel) UpdateLimits(newLimits TunnelLimits) {
+func (t Tunnel) UpdateLimits(newLimits limiter.RateLimits) {
 	select {
-	case t.updateLimitsChan <- newLimits:
+	case t.updateLimits <- newLimits:
 	case <-t.shutdown:
 	}
 }
@@ -51,9 +50,9 @@ func (t Tunnel) Shutdown() {
 
 // NewTunnel creates a traffic forwarding tunnel with a given listen port
 // spec and configuration. Inbound connection listening begins immediately.
-func NewTunnel(listenAt ListenAt, connectTo ConnectTo, limits TunnelLimits) (*Tunnel, error) {
+func NewTunnel(listenAt ListenAt, connectTo ConnectTo, limits limiter.RateLimits) (*Tunnel, error) {
 	shutdown := make(chan struct{})
-	updateLimitsChan := make(chan TunnelLimits)
+	updateLimitsChan := make(chan limiter.RateLimits)
 	wg := new(sync.WaitGroup)
 
 	log.Printf("Starting tunnel at %q", listenAt)
@@ -65,14 +64,13 @@ func NewTunnel(listenAt ListenAt, connectTo ConnectTo, limits TunnelLimits) (*Tu
 	}
 	// It's internal Tunnel's run() responsibility to close the listener
 	result := &Tunnel{
-		listenAt:         listenAt,
-		connectTo:        connectTo,
-		updateLimitsChan: updateLimitsChan,
-		shutdown:         shutdown,
-		listener:         l,
-		limiter:          CreateLimiter(limits.TunnelLimit),
-		connectionLimit:  limits.ConnectionLimit,
-		waitGroup:        wg,
+		listenAt:      listenAt,
+		connectTo:     connectTo,
+		shutdown:      shutdown,
+		listener:      limiter.NewRateLimitingListener(l, limits),
+		currentLimits: limits,
+		updateLimits:  updateLimitsChan,
+		waitGroup:     wg,
 	}
 
 	wg.Add(1)
@@ -112,7 +110,7 @@ func NewTunnel(listenAt ListenAt, connectTo ConnectTo, limits TunnelLimits) (*Tu
 				if err != nil {
 					log.Printf("Failed to listen at %q: %v", listenAt, err)
 				} else {
-					result.listener = l
+					result.listener = limiter.NewRateLimitingListener(l, result.currentLimits)
 				}
 			case <-shutdown:
 				log.Printf("Detected tunnel shutdown while retrying listening at %q", listenAt)
@@ -190,7 +188,7 @@ func (t *Tunnel) run() error {
 
 			log.Printf("Accepted connection at %q", t.listenAt)
 
-			conn := NewConnection(netConn.connection, t.connectTo, t.createConnectionLimits())
+			conn := NewConnection(netConn.connection, t.connectTo)
 			connDone, err := conn.Run()
 			if err != nil {
 				log.Printf("Failed to connect to %q: %v", t.connectTo, err)
@@ -222,12 +220,8 @@ func (t *Tunnel) run() error {
 				log.Printf("Closed connection at %q", t.listenAt)
 			}
 
-		case limits := <-t.updateLimitsChan:
-			t.limiter = CreateLimiter(limits.TunnelLimit)
-			t.connectionLimit = limits.ConnectionLimit
-			for conn := range activeConnections {
-				conn.UpdateLimits(t.createConnectionLimits())
-			}
+		case limits := <-t.updateLimits:
+			t.listener.UpdateLimits(limits)
 			log.Printf("Tunnel at %q limits updated: %v", t.listenAt, limits)
 
 		case <-t.shutdown:
@@ -237,41 +231,15 @@ func (t *Tunnel) run() error {
 	} // for
 }
 
-func (t *Tunnel) createConnectionLimits() ConnectionLimits {
-	return ConnectionLimits{
-		TunnelLimiter:     t.limiter,
-		ConnectionLimiter: CreateLimiter(t.connectionLimit),
-	}
-}
-
 // Connection ensapsulates a single traffic forwarding connection within a
 // tunnel.
 type Connection struct {
-	ctx              context.Context
-	ctxCancel        func()
-	limits           ConnectionLimits
-	updateLimitsChan chan ConnectionLimits
+	ctx       context.Context
+	ctxCancel func()
 
 	ingress   net.Conn
 	connectTo ConnectTo
 	egress    net.Conn
-}
-
-// ConnectionLimits is a structure with bandwidth limits applying to a
-// connection. It holds a tunnel limiter (which is shared among all
-// connections that belong to a tunnel) and individual connection limit value.
-type ConnectionLimits struct {
-	TunnelLimiter     *rate.Limiter
-	ConnectionLimiter *rate.Limiter
-}
-
-// UpdateLimits updates bandwidth limits for a given connection.
-func (c Connection) UpdateLimits(newLimits ConnectionLimits) {
-	c.updateLimitsChan <- newLimits
-}
-
-func (l ConnectionLimits) toLimiters() []*rate.Limiter {
-	return []*rate.Limiter{l.TunnelLimiter, l.ConnectionLimiter}
 }
 
 type connectionComplete struct {
@@ -285,13 +253,11 @@ type connectionComplete struct {
 //
 // Beware that created Connection takes ownership of an ingress net.Conn and
 // closes it when gets closed.
-func NewConnection(ingress net.Conn, connectTo ConnectTo, limits ConnectionLimits) *Connection {
+func NewConnection(ingress net.Conn, connectTo ConnectTo) *Connection {
 	ctx, ctxCancel := context.WithCancel(context.Background())
 	return &Connection{
-		ctx:              ctx,
-		ctxCancel:        ctxCancel,
-		limits:           limits,
-		updateLimitsChan: make(chan ConnectionLimits),
+		ctx:       ctx,
+		ctxCancel: ctxCancel,
 
 		ingress:   ingress,
 		connectTo: connectTo,
@@ -316,9 +282,9 @@ func (c Connection) Close() {
 
 // Run performs traffic tunneling for a connection. It creates a socket
 // connected to an address given in connectTo argument and starts forwarding
-// traffic between ingress and destination with respect to limits.
+// traffic between ingress and destination.
 //
-// For each Connection, Run might only be invoked on a single gorouting
+// For each Connection, Run might only be invoked on a single goroutine
 // simultaneously. Attempts to Run single connection multiple times
 // concurrently will fail.
 func (c *Connection) Run() (chan error, error) {
@@ -329,9 +295,7 @@ func (c *Connection) Run() (chan error, error) {
 		return nil, err
 	}
 
-	limiters := c.limits.toLimiters()
-
-	ingressForwarder := CreateForwarder(c.ingress, c.egress, limiters)
+	ingressForwarder := CreateForwarder(c.ingress, c.egress)
 	go func() {
 		err := ingressForwarder.Run(c.ctx)
 		select {
@@ -340,28 +304,13 @@ func (c *Connection) Run() (chan error, error) {
 		}
 	}()
 
-	egressForwarder := CreateForwarder(c.egress, c.ingress, limiters)
+	egressForwarder := CreateForwarder(c.egress, c.ingress)
 	go func() {
 		err := egressForwarder.Run(c.ctx)
 		select {
 		case resultChan <- err:
 		case <-c.ctx.Done():
 		}
-	}()
-
-	// Listen for limit updates and propagate them to forwarders
-	go func() {
-		for {
-			select {
-			case newLimits := <-c.updateLimitsChan:
-				c.limits = newLimits
-				limiters = c.limits.toLimiters()
-				ingressForwarder.UpdateLimiters(c.ctx, limiters)
-				egressForwarder.UpdateLimiters(c.ctx, limiters)
-			case <-c.ctx.Done():
-				return
-			} // select
-		} // for
 	}()
 
 	return resultChan, nil

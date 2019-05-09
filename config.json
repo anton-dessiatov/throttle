@@ -3,7 +3,7 @@
     ":32167": {
       "connectTo": "localhost:32166",
       "tunnelLimit": "1Gbps",
-      "connectionLimit": "300Mbps"
+      "connectionLimit": "100Mbps"
     },
     ":32267": {
       "connectTo": "localhost:32166",
