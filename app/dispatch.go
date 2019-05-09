@@ -2,13 +2,11 @@ package app
 
 import (
 	"log"
-	"sync"
 )
 
 type dispatchTunnel struct {
-	tunnel     Tunnel
+	tunnel     *Tunnel
 	lastLimits TunnelLimits
-	waitGroup  *sync.WaitGroup
 }
 
 type tunnelKey struct {
@@ -57,7 +55,7 @@ func dispatch(configUpdate <-chan ConfigurationJSON, gs *gracefulShutdown) {
 						t.lastLimits = tunnelLimits
 					}
 				} else {
-					t, err := CreateTunnel(tunnelKey.listenAt, tunnelKey.connectTo, tunnelLimits)
+					t, err := NewTunnel(tunnelKey.listenAt, tunnelKey.connectTo, tunnelLimits)
 					if err != nil {
 						log.Printf("Failed to create tunnel for %q: %v", tunnelKey, err)
 					} else {

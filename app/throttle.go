@@ -15,9 +15,7 @@ type gracefulShutdown struct {
 }
 
 // Run gets the party started
-func Run() {
-	log.Println("Running")
-
+func Run(configPath string) {
 	quit := make(chan struct{})
 	gs := &gracefulShutdown{
 		quit:      quit,
@@ -25,10 +23,8 @@ func Run() {
 	}
 
 	configUpdate := make(chan ConfigurationJSON)
-
 	go dispatch(configUpdate, gs)
 
-	const configPath = "config.json"
 	err := LoadAndWatch(configPath, configUpdate, gs)
 	if err != nil {
 		log.Fatalf("Failed to load config file at %q: %v", configPath, err)

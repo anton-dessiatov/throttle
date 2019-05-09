@@ -97,18 +97,18 @@ func (x *Limit) UnmarshalJSON(data []byte) error {
 		numberString, mul, div := parseSuffix(s)
 		bytesPerSecond, err = strconv.ParseInt(numberString, 10, 64)
 		if err != nil {
-			return err
+			return fmt.Errorf("Failed to parse %q", s)
 		}
 		bytesPerSecond *= mul
 		bytesPerSecond /= div
 
-		if bytesPerSecond <= 0 {
-			return fmt.Errorf("%q is too small for bandwidth limit", s)
+		if bytesPerSecond < 0 {
+			return fmt.Errorf("Negative values are not accepted as a bandwidth limit (%q)", s)
 		}
 	}
 
-	if bytesPerSecond <= 0 {
-		return fmt.Errorf("%d is not a valid value for bandwidth limit", bytesPerSecond)
+	if bytesPerSecond < 0 {
+		return fmt.Errorf("Negative values are not accepted as a bandwidth limit (%q)", bytesPerSecond)
 	}
 
 	*x = Limit(bytesPerSecond)
