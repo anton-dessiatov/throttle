@@ -13,7 +13,12 @@ type RateLimitingListener struct {
 	inner             net.Listener
 	activeConnections map[*LimitedConnection]struct{}
 	close             chan struct{}
-	connectionClosed  chan *LimitedConnection
+
+	closed        bool
+	closeResult   error
+	closeResultMu *sync.Mutex
+
+	connectionClosed chan *LimitedConnection
 
 	globalLimiter   *rate.Limiter
 	currentLimits   rateLimits
@@ -43,6 +48,7 @@ func NewRateLimitingListener(listener net.Listener, global, perConn int) *RateLi
 		inner:             listener,
 		activeConnections: make(map[*LimitedConnection]struct{}),
 		close:             make(chan struct{}),
+		closeResultMu:     new(sync.Mutex),
 		connectionClosed:  make(chan *LimitedConnection),
 
 		globalLimiter: globalLimiter,
@@ -98,8 +104,19 @@ func (l *RateLimitingListener) Accept() (net.Conn, error) {
 
 // Close is an implementation of net.Listener.Close
 func (l *RateLimitingListener) Close() error {
-	close(l.close)
-	return l.inner.Close()
+	l.closeResultMu.Lock()
+	defer l.closeResultMu.Unlock()
+	if !l.closed {
+		close(l.close)
+		l.closeResult = l.inner.Close()
+		l.closed = true
+		return l.closeResult
+	}
+	if l.closeResult == nil {
+		return nil
+	}
+	l.closeResult = l.inner.Close()
+	return l.closeResult
 }
 
 // Addr is an implementation of net.Listener.Addr
