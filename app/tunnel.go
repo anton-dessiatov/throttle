@@ -27,14 +27,14 @@ type Tunnel struct {
 	connectTo     ConnectTo
 	shutdown      chan struct{}
 	listener      *limiter.RateLimitingListener
-	currentLimits limiter.RateLimits
-	updateLimits  chan limiter.RateLimits
+	currentLimits TunnelLimits
+	updateLimits  chan TunnelLimits
 	waitGroup     *sync.WaitGroup
 }
 
 // UpdateLimits sets new bandwidth limits for a tunnel. All active connections
 // of given tunnel are notified and have their limits updated as well.
-func (t Tunnel) UpdateLimits(newLimits limiter.RateLimits) {
+func (t Tunnel) UpdateLimits(newLimits TunnelLimits) {
 	select {
 	case t.updateLimits <- newLimits:
 	case <-t.shutdown:
@@ -50,9 +50,9 @@ func (t Tunnel) Shutdown() {
 
 // NewTunnel creates a traffic forwarding tunnel with a given listen port
 // spec and configuration. Inbound connection listening begins immediately.
-func NewTunnel(listenAt ListenAt, connectTo ConnectTo, limits limiter.RateLimits) (*Tunnel, error) {
+func NewTunnel(listenAt ListenAt, connectTo ConnectTo, limits TunnelLimits) (*Tunnel, error) {
 	shutdown := make(chan struct{})
-	updateLimitsChan := make(chan limiter.RateLimits)
+	updateLimitsChan := make(chan TunnelLimits)
 	wg := new(sync.WaitGroup)
 
 	log.Printf("Starting tunnel at %q", listenAt)
@@ -64,10 +64,11 @@ func NewTunnel(listenAt ListenAt, connectTo ConnectTo, limits limiter.RateLimits
 	}
 	// It's internal Tunnel's run() responsibility to close the listener
 	result := &Tunnel{
-		listenAt:      listenAt,
-		connectTo:     connectTo,
-		shutdown:      shutdown,
-		listener:      limiter.NewRateLimitingListener(l, limits),
+		listenAt:  listenAt,
+		connectTo: connectTo,
+		shutdown:  shutdown,
+		listener: limiter.NewRateLimitingListener(
+			l, int(limits.TunnelLimit), int(limits.ConnectionLimit)),
 		currentLimits: limits,
 		updateLimits:  updateLimitsChan,
 		waitGroup:     wg,
@@ -110,7 +111,9 @@ func NewTunnel(listenAt ListenAt, connectTo ConnectTo, limits limiter.RateLimits
 				if err != nil {
 					log.Printf("Failed to listen at %q: %v", listenAt, err)
 				} else {
-					result.listener = limiter.NewRateLimitingListener(l, result.currentLimits)
+					result.listener = limiter.NewRateLimitingListener(
+						l, int(result.currentLimits.TunnelLimit),
+						int(result.currentLimits.ConnectionLimit))
 				}
 			case <-shutdown:
 				log.Printf("Detected tunnel shutdown while retrying listening at %q", listenAt)
@@ -221,7 +224,7 @@ func (t *Tunnel) run() error {
 			}
 
 		case limits := <-t.updateLimits:
-			t.listener.UpdateLimits(limits)
+			t.listener.UpdateLimits(int(limits.TunnelLimit), int(limits.ConnectionLimit))
 			log.Printf("Tunnel at %q limits updated: %v", t.listenAt, limits)
 
 		case <-t.shutdown:

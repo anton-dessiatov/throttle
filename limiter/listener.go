@@ -15,32 +15,43 @@ type RateLimitingListener struct {
 	close             chan struct{}
 	connectionClosed  chan *LimitedConnection
 
-	limiter         *rate.Limiter
-	currentLimits   RateLimits
+	globalLimiter   *rate.Limiter
+	currentLimits   rateLimits
 	currentLimitsMu *sync.RWMutex
-	updateLimits    chan RateLimits
+	updateLimits    chan rateLimits
 }
 
-// RateLimits defines limits for RateLimitingListener to apply. Limits are
-// expressed in bytes per second
-type RateLimits struct {
-	ListenerLimit   rate.Limit
+type rateLimits struct {
+	GlobalLimit     rate.Limit
 	ConnectionLimit rate.Limit
 }
 
 // NewRateLimitingListener wraps given listener into a RateLimitingListener with
-// given initial limits
-func NewRateLimitingListener(listener net.Listener, limits RateLimits) *RateLimitingListener {
+// given initial limits.
+//
+// global is bandwidth that all this listener's connections are not allowed to
+// exceed when summed up together
+//
+// perConn is bandwidth that each individual connection is not allowed to
+// exceed
+func NewRateLimitingListener(listener net.Listener, global, perConn int) *RateLimitingListener {
+	var globalLimiter *rate.Limiter
+	if global > 0 {
+		globalLimiter = CreateLimiter(rate.Limit(global))
+	}
 	result := &RateLimitingListener{
 		inner:             listener,
 		activeConnections: make(map[*LimitedConnection]struct{}),
 		close:             make(chan struct{}),
 		connectionClosed:  make(chan *LimitedConnection),
 
-		limiter:         CreateLimiter(limits.ListenerLimit),
-		currentLimits:   limits,
+		globalLimiter: globalLimiter,
+		currentLimits: rateLimits{
+			GlobalLimit:     rate.Limit(global),
+			ConnectionLimit: rate.Limit(perConn),
+		},
 		currentLimitsMu: new(sync.RWMutex),
-		updateLimits:    make(chan RateLimits),
+		updateLimits:    make(chan rateLimits),
 	}
 
 	go result.dispatcher()
@@ -50,9 +61,12 @@ func NewRateLimitingListener(listener net.Listener, limits RateLimits) *RateLimi
 
 // UpdateLimits changes rate limits that apply to all connection that were
 // accepted (or will be accepted in future)
-func (l *RateLimitingListener) UpdateLimits(newLimits RateLimits) {
+func (l *RateLimitingListener) UpdateLimits(newGlobal, newPerConn int) {
 	select {
-	case l.updateLimits <- newLimits:
+	case l.updateLimits <- rateLimits{
+		GlobalLimit:     rate.Limit(newGlobal),
+		ConnectionLimit: rate.Limit(newPerConn),
+	}:
 	case <-l.close:
 	}
 }
@@ -65,10 +79,7 @@ func (l *RateLimitingListener) Accept() (net.Conn, error) {
 	}
 
 	l.currentLimitsMu.RLock()
-	multiLimiter := NewMultiLimiter([]*rate.Limiter{
-		l.limiter,
-		CreateLimiter(l.currentLimits.ConnectionLimit),
-	})
+	multiLimiter := l.createMultiLimiter()
 	l.currentLimitsMu.RUnlock()
 
 	limConn := NewLimitedConnection(innerConn, multiLimiter)
@@ -102,18 +113,18 @@ func (l *RateLimitingListener) dispatcher() {
 		case newLimits := <-l.updateLimits:
 
 			l.currentLimitsMu.Lock()
-			l.limiter = CreateLimiter(newLimits.ListenerLimit)
+			l.globalLimiter = nil
+			if newLimits.GlobalLimit > 0 {
+				l.globalLimiter = CreateLimiter(rate.Limit(newLimits.GlobalLimit))
+			}
 			l.currentLimits = newLimits
 			l.currentLimitsMu.Unlock()
 
 			// No need to read-lock because we are the only ones capable of modifying
 			// limits and we've already done it.
 			for conn := range l.activeConnections {
-				limiter := NewMultiLimiter([]*rate.Limiter{
-					l.limiter,
-					CreateLimiter(l.currentLimits.ConnectionLimit),
-				})
-				conn.UpdateLimiter(limiter)
+				multiLimiter := l.createMultiLimiter()
+				conn.UpdateLimiter(multiLimiter)
 			}
 		case closedConn := <-l.connectionClosed:
 			delete(l.activeConnections, closedConn)
@@ -122,4 +133,15 @@ func (l *RateLimitingListener) dispatcher() {
 			return
 		}
 	}
+}
+
+func (l *RateLimitingListener) createMultiLimiter() *MultiLimiter {
+	limiters := make([]*rate.Limiter, 0, 2)
+	if l.globalLimiter != nil {
+		limiters = append(limiters, l.globalLimiter)
+	}
+	if l.currentLimits.ConnectionLimit > 0 {
+		limiters = append(limiters, CreateLimiter(l.currentLimits.ConnectionLimit))
+	}
+	return NewMultiLimiter(limiters)
 }

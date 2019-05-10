@@ -2,14 +2,11 @@ package app
 
 import (
 	"log"
-
-	"github.com/anton-dessiatov/throttle/limiter"
-	"golang.org/x/time/rate"
 )
 
 type dispatchTunnel struct {
 	tunnel     *Tunnel
-	lastLimits limiter.RateLimits
+	lastLimits TunnelLimits
 }
 
 type tunnelKey struct {
@@ -47,9 +44,9 @@ func dispatch(configUpdate <-chan ConfigurationJSON, gs *gracefulShutdown) {
 					listenAt:  k,
 					connectTo: v.ConnectTo,
 				}
-				rateLimits := limiter.RateLimits{
-					ListenerLimit:   rate.Limit(v.TunnelLimit),
-					ConnectionLimit: rate.Limit(v.ConnectionLimit),
+				rateLimits := TunnelLimits{
+					TunnelLimit:     Limit(v.TunnelLimit),
+					ConnectionLimit: Limit(v.ConnectionLimit),
 				}
 				t, ok := tunnels[tunnelKey]
 				if ok {

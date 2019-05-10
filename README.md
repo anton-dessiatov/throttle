@@ -36,11 +36,14 @@ If no unit of measure is specified, bytes per second are assumed.
 Beware that uppercase 'B' means bytes and lowercase 'b' means bits. Values less
 than 8 bits per second are considered to be zero.
 
+Zero value for any limit means that this particular bandwidth should not be
+limited.
+
 Be aware that throughput is limited based on both inbound and outgoing traffic
 (e.g if you have 50Kbps limit for connection and you have 20Kbps inbound stream,
 outbound will get limited to 30Kbps). Tunnel limits, in a similar way, take into
 account both inbound and outbound stream of all connections belonging to a
-tunne..
+tunnel.
 
 Application loads configuration from ```config.json``` file in the current
 directory (you could also use ```-config``` command-line argument to specify
@@ -73,9 +76,6 @@ sudo tcptrack -i lo
 
  * I'd prefer using fsnotify instead of unobvious reloading upon SIGUSR2 signal,
    but according to assignment I cannot use anything beyond golang.org/x/*
-
- * I'm allowing for zero throughputs because I believe it might actually be
-   useful to temporarily suspend connections from a given server.
 
  * Golang JSON parsers don't report an error if there are duplicate keys in JSON
    objects. Consequently if there are duplicate listening specifications in
